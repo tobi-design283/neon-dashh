@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Geometry Dash Clone</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@700&display=swap');
+
+        body {
+            background-color: #111;
+            color: white;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Orbitron', sans-serif;
+        }
+
+        #gameContainer {
+            position: relative;
+            box-shadow: 0 0 50px rgba(0, 255, 255, 0.2);
+            border: 4px solid #333;
+            border-radius: 4px;
+        }
+
+        canvas {
+            display: block;
+            background: linear-gradient(to bottom, #20002c, #cbb4d4);
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            text-shadow: 2px 2px 4px #000;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        h1 {
+            font-size: 48px;
+            margin: 0 0 20px 0;
+            color: #0ff;
+        }
+
+        p {
+            font-size: 20px;
+            margin: 5px 0;
+        }
+
+        .score-hud {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            font-size: 24px;
+            color: white;
+            text-shadow: 2px 2px 0 #000;
+        }
+
+        .controls {
+            margin-top: 20px;
+            font-size: 14px;
+            color: #aaa;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="gameContainer">
+        <canvas id="gameCanvas" width="640" height="480"></canvas>
+        <div id="ui-layer">
+            <div id="startScreen">
+                <h1>NEO DASH</h1>
+                <p>Press SPACE or CLICK to Jump</p>
+                <p>Avoid Spikes and Walls</p>
+                <p class="controls">Press SPACE to Start</p>
+            </div>
+            <div id="gameOverScreen" class="hidden">
+                <h1 style="color: #ff3333">CRASHED!</h1>
+                <p>Score: <span id="finalScore">0</span></p>
+                <p class="controls">Press SPACE to Restart</p>
+            </div>
+        </div>
+        <div class="score-hud">Score: <span id="currentScore">0</span></div>
+    </div>
+
+<script>
+/**
+ * 1. UTILITY CLASSES
+ */
+class Utils {
+    static rectIntersect(r1, r2) {
+        return !(r2.left > r1.right || 
+                 r2.right < r1.left || 
+                 r2.top > r1.bottom || 
+                 r2.bottom < r1.top);
+    }
+
+    static randomRange(min, max) {
+        return Math.random() * (max - min) + min;
+    }
+
+    static lerp(start, end, t) {
+        return start * (1 - t) + end * t;
+    }
+}
+
+class InputManager {
+    constructor() {
+        this.keys = {};
+        this.jumpPressed = false;
+        
+        window.addEventListener('keydown', (e) => {
+            this.keys[e.code] = true;
+            if (e.code === 'Space' || e.code === 'ArrowUp') {
+                this.jumpPressed = true;
+                e.preventDefault();
+            }
+        });
+
+        window.addEventListener('keyup', (e) => {
+            this.keys[e.code] = false;
+            if (e.code === 'Space' || e.code === 'ArrowUp') {
+                this.jumpPressed = false;
+            }
+        });
+
+        window.addEventListener('mousedown', (e) => {
+            this.jumpPressed = true;
+        });
+
+        window.addEventListener('mouseup', (e) => {
+            this.jumpPressed = false;
+        });
+    }
+
+    isJumpTriggered() {
+        // Returns true once per press (handled in game loop logic typically, 
+        // but simple boolean check is fine for this arcade style if reset properly)
+        return this.jumpPressed;
+    }
+}
+
+/**
+ * 2. BASE GAME OBJECT CLASS
+ */
+class GameObject {
+    constructor(x, y, width, height, color) {
+        this.x = x;
+        this.y = y;
+        this.width = width;
+        this.height = height;
+        this.color = color;
+        this.markedForDeletion = false;
+    }
+
+    update(dt, speed) {
+        // Base behavior
+    }
+
+    render(ctx) {
+        ctx.fillStyle = this.color;
+        ctx.fillRect(this.x, this.y, this.width, this.height);
+    }
+
+    getBounds() {
+        return {
+            left: this.x,
+            right: this.x + this.width,
+            top: this.y,
+            bottom: this.y + this.height
+        };
+    }
+}
+
+/**
+ * 3. PARTICLE SYSTEM
+ */
+class Particle extends GameObject {
+    constructor(x, y, color) {
+        super(x, y, Utils.randomRange(4, 10), Utils.randomRange(4, 10), color);
+        const angle = Utils.randomRange(0, Math.PI * 2);
+        const speed = Utils.randomRange(100, 300);
+        this.vx = Math.cos(angle) * speed;
+        this.vy = Math.sin(angle) * speed;
+        this.life = 1.0; // 1 second
+        this.decay = Utils.randomRange(0.5, 1.5);
+    }
+
+    update(dt) {
+        this.x += this.vx * dt;
+        this.y += this.vy * dt;
+        this.life -= this.decay * dt;
+        if (this.life <= 0) this.markedForDeletion = true;
+    }
+
+    render(ctx) {
+        ctx.globalAlpha = this.life;
+        ctx.fillStyle = this.color;
+        ctx.fillRect(this.x, this.y, this.width, this.height);
+        ctx.globalAlpha = 1.0;
+    }
+}
+
+/**
+ * 4. GAME ENTITIES
+ */
+class Player extends GameObject {
+    constructor(x, y) {
+        super(x, y, 40, 40, '#FFD700'); // Gold color
+        this.originalY = y;
+        this.vy = 0;
+        this.gravity = 2500;
+        this.jumpForce = -900;
+        this.onGround = true;
+        this.rotation = 0;
+        this.isDead = false;
+    }
+
+    update(dt, input) {
+        if (this.isDead) return;
+
+        // Jump Input
+        if (input.isJumpTriggered() && this.onGround) {
+            this.vy = this.jumpForce;
+            this.onGround = false;
+        }
+
+        // Apply Gravity
+        this.vy += this.gravity * dt;
+        this.y += this.vy * dt;
+
+        // Ground Floor Collision (Base floor at y=400)
+        if (this.y >= 400 - this.height) {
+            this.y = 400 - this.height;
+            this.vy = 0;
+            this.onGround = true;
+            
+            // Snap rotation to nearest 90
+            const snap = Math.round(this.rotation / (Math.PI / 2)) * (Math.PI / 2);
+            this.rotation = snap;
+        }
+
+        // Rotation logic
+        if (!this.onGround) {
+            this.rotation += 5 * dt; // Rotate while jumping
+        } else {
+            // Smoothly correct rotation if on ground
+            const snap = Math.round(this.rotation / (Math.PI / 2)) * (Math.PI / 2);
+            this.rotation = Utils.lerp(this.rotation, snap, 15 * dt);
+        }
+    }
+
+    render(ctx) {
+        if (this.isDead) return;
+
+        ctx.save();
+        // Translate to center of player
+        ctx.translate(this.x + this.width / 2, this.y + this.height / 2);
+        ctx.rotate(this.rotation);
+        
+        // Draw Player Body
+        ctx.fillStyle = this.color;
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = this.color;
+        ctx.fillRect(-this.width / 2, -this.height / 2, this.width, this.height);
+        
+        // Draw Face
+        ctx.fillStyle = '#000';
+        ctx.shadowBlur = 0;
+        ctx.fillRect(4, -10, 8, 8); // Eye
+        ctx.fillRect(4, 5, 12, 4);  // Mouth
+        
+        ctx.restore();
+    }
+
+    die() {
+        this.isDead = true;
+    }
+    
+    reset(x, y) {
+        this.x = x;
+        this.y = y;
+        this.vy = 0;
+        this.rotation = 0;
+        this.onGround = true;
+        this.isDead = false;
+    }
+}
+
+class Spike extends GameObject {
+    constructor(x, y) {
+        super(x, y, 40, 40, '#FF0055');
+        this.type = 'spike';
+    }
+
+    update(dt, speed) {
+        this.x -= speed * dt;
+        if (this.x + this.width < 0) this.markedForDeletion = true;
+    }
+
+    render(ctx) {
+        ctx.fillStyle = this.color;
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = this.color;
+        
+        ctx.beginPath();
+        ctx.moveTo(this.x, this.y + this.height);
+        ctx.lineTo(this.x + this.width / 2, this.y);
+        ctx.lineTo(this.x + this.width, this.y + this.height);
+        ctx.closePath();
+        ctx.fill();
+        ctx.shadowBlur = 0;
+    }
+
+    // Tighter hitbox for spikes to be forgiving
+    getBounds() {
+        return {
+            left: this.x + 10,
+            right: this.x + this.width - 10,
+            top: this.y + 10,
+            bottom: this.y + this.height
+        };
+    }
+}
+
+class Platform extends GameObject {
+    constructor(x, y, w, h) {
+        super(x, y, w, h, '#00FFFF');
+        this.type = 'platform';
+    }
+
+    update(dt, speed) {
+        this.x -= speed * dt;
+        if (this.x + this.width < 0) this.markedForDeletion = true;
+    }
+
+    render(ctx) {
+        ctx.fillStyle = this.color;
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = this.color;
+        ctx.fillRect(this.x, this.y, this.width, this.height);
+        
+        // Inner detail
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(this.x + 2, this.y + 2, this.width - 4, this.height - 4);
+        ctx.shadowBlur = 0;
+    }
+}
+
+class Floor {
+    constructor(y, width, height) {
+        this.y = y;
+        this.width = width;
+        this.height = height;
+        this.offsetX = 0;
+        this.color = '#0044aa';
+    }
+
+    update(dt, speed) {
+        this.offsetX = (this.offsetX + speed * dt) % 40; // 40 is grid size
+    }
+
+    render(ctx) {
+        // Draw main floor rect
+        ctx.fillStyle = '#1a1a2e';
+        ctx.fillRect(0, this.y, this.width, this.height);
+
+        // Draw top line
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = '#fff';
+        ctx.beginPath();
+        ctx.moveTo(0, this.y);
+        ctx.lineTo(this.width, this.y);
+        ctx.stroke();
+
+        // Draw Grid effect
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+        ctx.lineWidth = 1;
+        ctx.shadowBlur = 0;
+        
+        for (let i = 0; i < this.width / 40 + 1; i++) {
+            let x = i * 40 - this.offsetX;
+            ctx.beginPath();
+            ctx.moveTo(x, this.y);
+            ctx.lineTo(x - 20, this.y + this.height); // Skewed lines
+            ctx.stroke();
+        }
+    }
+}
+
+/**
+ * 5. LEVEL MANAGER
+ */
+class LevelManager {
+    constructor() {
+        this.timer = 0;
+        this.nextSpawnTime = 0;
+        this.patterns = [
+            'spike', 'double_spike', 'triple_spike', 
+            'box', 'box_spike', 'staircase'
+        ];
+    }
+
+    reset() {
+        this.timer = 0;
+        this.nextSpawnTime = 1.5;
+    }
+
+    update(dt, gameSpeed, game) {
+        this.timer += dt;
+
+        if (this.timer >= this.nextSpawnTime) {
+            this.spawnPattern(game);
+            // Decrease spawn time slightly as speed increases, but clamp it
+            let interval = 1.5 - (gameSpeed - 300) / 1000; 
+            if (interval < 0.9) interval = 0.9;
+            this.nextSpawnTime = this.timer + interval;
+        }
+    }
+
+    spawnPattern(game) {
+        const type = this.patterns[Math.floor(Math.random() * this.patterns.length)];
+        const startX = 640 + 50;
+        const groundY = 400;
+
+        switch (type) {
+            case 'spike':
+                game.addEntity(new Spike(startX, groundY - 40));
+                break;
+            case 'double_spike':
+                game.addEntity(new Spike(startX, groundY - 40));
+                game.addEntity(new Spike(startX + 40, groundY - 40));
+                break;
+            case 'triple_spike':
+                game.addEntity(new Spike(startX, groundY - 40));
+                game.addEntity(new Spike(startX + 40, groundY - 40));
+                game.addEntity(new Spike(startX + 80, groundY - 40));
+                break;
+            case 'box':
+                game.addEntity(new Platform(startX, groundY - 40, 40, 40));
+                break;
+            case 'box_spike':
+                game.addEntity(new Platform(startX, groundY - 40, 40, 40));
+                game.addEntity(new Spike(startX + 40, groundY - 40));
+                break;
+            case 'staircase':
+                game.addEntity(new Platform(startX, groundY - 40, 40, 40));
+                game.addEntity(new Platform(startX + 40, groundY - 80, 40, 80)); // Tall block
+                game.addEntity(new Platform(startX + 80, groundY - 120, 40, 120)); // Taller
+                break;
+        }
+    }
+}
+
+/**
+ * 6. GAME MANAGER CLASS
+ */
+class Game {
+    constructor(canvas) {
+        this.canvas = canvas;
+        this.ctx = canvas.getContext('2d');
+        this.width = canvas.width;
+        this.height = canvas.height;
+        
+        this.input = new InputManager();
+        this.player = new Player(100, 300);
+        this.floor = new Floor(400, this.width, this.height - 400);
+        this.levelManager = new LevelManager();
+        
+        this.entities = [];
+        this.particles = [];
+        
+        this.state = 'MENU'; // MENU, PLAYING, GAMEOVER
+        this.score = 0;
+        this.gameSpeed = 350;
+        
+        this.lastTime = 0;
+        this.bgHue = 0;
+
+        // UI Elements
+        this.uiStart = document.getElementById('startScreen');
+        this.uiGameOver = document.getElementById('gameOverScreen');
+        this.uiScore = document.getElementById('currentScore');
+        this.uiFinalScore = document.getElementById('finalScore');
+    }
+
+    start() {
+        requestAnimationFrame(this.gameLoop.bind(this));
+    }
+
+    reset() {
+        this.player.reset(100, 300);
+        this.entities = [];
+        this.particles = [];
+        this.score = 0;
+        this.gameSpeed = 350;
+        this.levelManager.reset();
+        this.state = 'PLAYING';
+        
+        this.uiStart.classList.add('hidden');
+        this.uiGameOver.classList.add('hidden');
+    }
+
+    addEntity(entity) {
+        this.entities.push(entity);
+    }
+
+    spawnDeathParticles(x, y, color) {
+        for (let i = 0; i < 20; i++) {
+            this.particles.push(new Particle(x, y, color));
+        }
+    }
+
+    checkCollisions() {
+        const pBounds = this.player.getBounds();
+
+        for (let entity of this.entities) {
+            const eBounds = entity.getBounds();
+
+            if (Utils.rectIntersect(pBounds, eBounds)) {
+                if (entity.type === 'spike') {
+                    return true; // Death
+                } 
+                else if (entity.type === 'platform') {
+                    // Collision resolution logic
+                    // 1. Check if landing on top
+                    // Tolerance: Player bottom is close to Platform top, and Player is falling
+                    const overlapY = pBounds.bottom - eBounds.top;
+                    const overlapX = pBounds.right - eBounds.left;
+                    
+                    // If we are high enough and falling
+                    if (overlapY < 20 && this.player.vy >= 0 && pBounds.bottom <= eBounds.top + 20) {
+                        this.player.y = eBounds.top - this.player.height;
+                        this.player.vy = 0;
+                        this.player.onGround = true;
+                        
+                        // Snap rotation
+                        const snap = Math.round(this.player.rotation / (Math.PI / 2)) * (Math.PI / 2);
+                        this.player.rotation = snap;
+                    } else {
+                        // Hit the side or bottom
+                        return true; // Death
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    update(dt) {
+        // Dynamic Background
+        this.bgHue = (this.bgHue + 10 * dt) % 360;
+        
+        if (this.state === 'MENU') {
+            if (this.input.isJumpTriggered()) {
+                this.reset();
+            }
+            return;
+        }
+
+        if (this.state === 'GAMEOVER') {
+            // Update particles even in game over
+            this.particles.forEach(p => p.update(dt));
+            this.particles = this.particles.filter(p => !p.markedForDeletion);
+            
+            if (this.input.isJumpTriggered()) {
+                this.reset();
+            }
+            return;
+        }
+
+        // --- PLAYING STATE ---
+
+        // Increase speed over time
+        this.gameSpeed += 5 * dt;
+
+        // Player
+        this.player.update(dt, this.input);
+
+        // Floor
+        this.floor.update(dt, this.gameSpeed);
+
+        // Level Generation
+        this.levelManager.update(dt, this.gameSpeed, this);
+
+        // Entities
+        this.entities.forEach(e => e.update(dt, this.gameSpeed));
+        this.entities = this.entities.filter(e => !e.markedForDeletion);
+
+        // Particles
+        this.particles.forEach(p => p.update(dt));
+        this.particles = this.particles.filter(p => !p.markedForDeletion);
+
+        // Collisions
+        if (this.checkCollisions()) {
+            this.state = 'GAMEOVER';
+            this.player.die();
+            this.spawnDeathParticles(this.player.x + this.player.width/2, this.player.y + this.player.height/2, this.player.color);
+            this.uiFinalScore.innerText = Math.floor(this.score);
+            this.uiGameOver.classList.remove('hidden');
+        }
+
+        // Score
+        this.score += this.gameSpeed * dt * 0.01;
+        this.uiScore.innerText = Math.floor(this.score);
+    }
+
+    render() {
+        // Clear Canvas
+        this.ctx.fillStyle = `hsl(${this.bgHue}, 40%, 20%)`; // Dynamic dark background
+        this.ctx.fillRect(0, 0, this.width, this.height);
+
+        // Render Floor
+        this.floor.render(this.ctx);
+
+        // Render Entities
+        this.entities.forEach(e => e.render(this.ctx));
+
+        // Render Player
+        this.player.render(this.ctx);
+
+        // Render Particles
+        this.particles.forEach(p => p.render(this.ctx));
+    }
+
+    gameLoop(timestamp) {
+        const dt = Math.min((timestamp - this.lastTime) / 1000, 0.1); // Clamp dt
+        this.lastTime = timestamp;
+
+        this.update(dt);
+        this.render();
+
+        requestAnimationFrame(this.gameLoop.bind(this));
+    }
+}
+
+// 7. INITIALIZATION
+window.onload = () => {
+    const canvas = document.getElementById('gameCanvas');
+    const game = new Game(canvas);
+    game.start();
+};
+
+</script>
+</body>
+</html>
